@@ -1,0 +1,210 @@
+# 24Hour‑AI — Comprehensive Product & Technical Specification
+
+**Version:** 0.9 (April 27 2025)  
+**Owner:** Gio (Luis Giovanni Ruiz)  
+**Status:** Draft (living document — iterate until all checklist items are ✅)  
+**Previous Name:** 24HourGPT  
+
+---
+## 1 · Executive Summary
+24Hour‑AI is a paid AI‑as‑a‑Service chat platform that sells **time‑boxed chat passes** (24 h) and **recurring subscriptions**. Users choose cutting‑edge LLMs (GPT‑4o, Mistral‑Large, Gemini 1.5) and interact through a polished web app. The business model couples low‑friction pricing (\$1 pass, \$5 reasoning pass) with a \$50 / mo Pro tier that unlocks persistent history and higher token budgets. All prior conversations have converged on a **Next.js 15 + TS + Supabase + Pinecone + Clerk + Square + ShadCN UI** stack, with modular “nodes” (PocketFlow‑style) so new capabilities slot in without rewrites.
+
+---
+## 2 · Goals & Non‑Goals
+| # | Goal | Non‑Goal |
+|---|------|----------|
+| 1 | Deliver a **MVP** that reliably sells 24 h chat access | Native mobile apps (defer) |
+| 2 | Keep infra **stateless** for pass users; offer persistence only for subscribers | Long‑term free storage |
+| 3 | Support **multiple LLM providers** via a pluggable class system | Hosting our own GPU inference at launch |
+| 4 | Treat payments & auth as first‑class flows (Square + Clerk) | Stripe (for this product), PayPal |
+| 5 | Expose admin analytics & manual refund tools | Fancy BI suite |
+| 6 | Ship with ShadCN‑styled UI that feels premium | Pixel‑perfect bespoke branding at MVP |
+
+---
+## 3 · Personas & Use Cases
+1. **Occasional User** — pays \$1, asks < 50 messages, wants quick answer, no storage.
+2. **Power User** — buys \$5 “Reasoning Pass” for heavier tokens, still no storage.
+3. **SMB Owner** — \$50/mo subscription; expects persistent chat, JSONL export, and priority models.
+4. **Gio / Admin** — monitors metrics, sets prices, handles refunds & abuse.
+
+---
+## 4 · System Architecture
+```
+┌──────────────┐  HTTPS   ┌───────────────────┐    Edge Fn   ┌────────────┐
+│  React App   │◀────────▶│ Next.js API Routes│◀────────────▶│ LLM Adapters│
+│  (App Router)│          │  (Server Actions) │             │(OpenAI …)  │
+└──────┬───────┘          └────────┬──────────┘             └────┬───────┘
+       │ Session / Clerk JWT       │ Supabase RPC                     │
+┌──────▼───────┐           ┌───────▼────────┐                ┌────▼──────┐
+│   Clerk      │           │  Supabase      │  Webhooks      │ Pinecone  │
+│ (Auth)       │           │  (Postgres +   │◀──────────────▶│  Vector   │
+└──────────────┘           │  Storage)      │                │  DB       │
+                           └───────────────┘                └───────────┘
+```
+* **Frontend:** Next.js 14 (App Router, Server Components). ShadCN UI, React‑Query for data fetching.  
+* **Backend:** Next.js API routes + Edge Functions for streaming responses.  
+* **Database:** Supabase (Postgres) with Row‑Level Security. Tables: `users`, `passes`, `subscriptions`, `chat_sessions`, `messages`, `payments`.  
+* **Vectors:** Pinecone index keyed by `session_id` (pass users) or `user_id` (subscribers).  
+* **Auth:** Clerk JWT; webhook grants or revokes Supabase RLS roles.  
+* **Payments:** Square Checkout Links → Webhook → `payments` table; passes unlocked via signed cookie.  
+* **Caching:** Redis Cloud for recent answer caching & rate‑limit buckets (future).  
+* **CI/CD:** GitHub Actions → Vercel.  
+
+---
+## 5 · Tech‑Stack Rationale (latest decisions)
+| Layer | Choice | Conversation Reference |
+|-------|--------|------------------------|
+| Frontend | Next.js 14 + TS + ShadCN | 04‑21, 04‑26 modular components |
+| Auth | Clerk | 03‑30, 04‑21 discussions |
+| DB | Supabase (Postgres + Storage) | Multiple chats since 2024‑07 |
+| Vectors | Pinecone | 03‑11 RAG plan |
+| Cache | Redis Cloud | 10‑07 decision |
+| Payment | Square APIs | 02‑07 & 01‑24 notes |
+| LLM | OpenAI, Mistral, Google via pluggable adapters | 04‑06 modular LLM classes |
+| Orchestration | PocketFlow‑style Nodes | 04‑27 “BaseNode” dialogue |
+
+---
+## 6 · Feature Map
+### 6.1 Chat Experience
+1. **Message Stream w/ Tokens Counter** (ShadCN `ScrollArea`).
+2. **Model Selector** (dropdown) — GPT‑4o default, others behind checks.
+3. **Chat Pass Timer** — countdown badge; disables input when expired.
+4. **History Download** (JSONL export) for pass users.
+5. **Persistent History** view for subscribers (`/dashboard/history`).
+
+### 6.2 Commerce
+* **Pass Purchase Flow**  
+  1. User not signed in → Clerk sign‑up.  
+  2. Square Checkout → webhook writes `passes` row `{expires_at}`.  
+  3. Signed cookie `pass_token` sent to browser.
+* **Subscription Flow** — Square recurring plans; webhook toggles `subscriptions.active`.
+* **Admin Refund UI** — call Square Refund API.
+
+### 6.3 Account & Admin
+* **Settings** page — API key visibility, theme.
+* **Admin Dashboard** — metrics (new passes, GMV, top models), toggle maintenance.
+* **RLS Roles** — `anon`, `pass`, `subscriber`, `admin`.
+
+---
+## 7 · Data Model (Supabase)
+```mermaid
+erDiagram
+  users ||--o{ chat_sessions : "has"
+  users ||--o{ passes : "purchases"
+  users ||--o{ subscriptions : "subscribes"
+  passes ||--o{ chat_sessions : "unlocks"
+  chat_sessions ||--|{ messages : "contains"
+  users ||--o{ payments : "records"
+```
+Key columns (non‑exhaustive):
+* **users**: `id`, `clerk_id`, `email`, `role`
+* **passes**: `id`, `user_id`, `type`, `expires_at`
+* **subscriptions**: `id`, `user_id`, `status`, `plan`, `renew_at`
+* **chat_sessions**: `id`, `user_id`, `model`, `started_at`
+* **messages**: `id`, `session_id`, `role`, `content`, `vector_id`
+* **payments**: `id`, `user_id`, `square_payment_id`, `amount`, `status`
+
+---
+## 8 · Pluggable LLM Class System (pseudocode)
+```ts
+interface LLMModule {
+  name: string;
+  maxTokens: number;
+  embed(text: string): Promise<Float32Array>;
+  chat(messages: Message[], opts: ChatOpts): AsyncIterable<Delta>;
+}
+```
+Adapters: `OpenAIChat`, `MistralChat`, `GeminiChat`.  
+Front‑end dropdown drives `providerKey` → server picks class.
+
+---
+## 9 · PocketFlow‑Inspired Node Graph
+```python
+class AuthNode(BaseNode):
+    def exec(self, prep):
+        assert prep["role"] in {"pass","subscriber"}, "Unauthorized"
+
+class PaymentCheckNode(BaseNode):
+    def exec(self, prep):
+        if prep["pass_expired"]: raise ExpiredError
+
+class ChatNode(BaseNode):
+    def exec(self, prep):
+        return llm.chat(prep["history"], opts)
+
+AuthNode().next(PaymentCheckNode()).next(ChatNode())
+```
+Future nodes: `EmbedNode`, `StoreVectorNode`, `ModerationNode`.
+
+---
+## 10 · API Contracts
+| Method | Route | Auth | Body | Notes |
+|--------|-------|------|------|-------|
+| POST | `/api/chat` | Clerk JWT | `{sessionId?, messages[], model}` | Streams text + usage |
+| POST | `/api/passes/webhook` | Square | raw | Verifies signature, inserts pass |
+| POST | `/api/subscriptions/webhook` | Square | raw | Upsert subscription |
+| GET | `/api/history/:sessionId` | pass or subscriber | – | Returns paginated messages |
+
+---
+## 11 · Security & Compliance
+* **RLS everywhere** — default deny.  
+* **Supabase Policies**: row owner OR admin.  
+* **Signed URLs** for pass timer cookie.  
+* **LLM Moderation** → OpenAI moderation API before reply.  
+* GDPR: user can delete all data (`/settings/delete`).
+
+---
+## 12 · Deployment & Ops
+* **Vercel** → Preview + Prod.
+* **Supabase Cloud** — free tier dev, paid prod.
+* **Pinecone Starter‑p2** index.
+* **GitHub Actions** — lint, type‑check, e2e Playwright, auto‑deploy.
+* **Monitoring** — Vercel Analytics, Supabase Logs, Sentry.
+
+---
+## 13 · Checklist Tracker
+| Area | Task | Status |
+|------|------|--------|
+| Domain | `24hour-ai.com` purchased | ✅ Done |
+| Repo | Next.js scaffold w/ TS | ✅ Done |
+| Auth | Integrate Clerk provider | ⬜ In‑progress |
+| Payments | Square checkout & webhooks | ⬜ |
+| DB | Supabase schema & RLS | ⬜ |
+| Vectors | Pinecone index + upsert | ⬜ |
+| Chat | `/api/chat` streaming route | ✅ |
+| Nodes | Refactor into PocketFlow nodes | ⬜ |
+| UI | ShadCN component library installed | ✅ |
+| Design | Luxury theme polish | ⬜ |
+| Admin | Metrics dashboard | ⬜ |
+| CI/CD | GitHub Actions → Vercel | ✅ |
+
+**Loop until table is all ✅.** Each sprint begins by scanning this list, checking items, and implementing the next highest‑value empty cell.
+
+---
+## 14 · Roadmap (6‑Week MVP Push)
+| Week | Focus | Outcomes |
+|------|-------|----------|
+| 1 | Clerk auth, Supabase schema | Users table w/ RLS, sign‑in flows |
+| 2 | Square pass purchase | Checkout link, webhook pass unlock |
+| 3 | Subscription tier | Recurring plan, role upgrade |
+| 4 | Vector storage | Upsert on message save, retrieval on prompt |
+| 5 | Admin & analytics | Dashboard, refund flow |
+| 6 | Design polish, QA | Responsive, accessibility, launch 🚀 |
+
+---
+## 15 · Industry Tips & Reminders
+* **Rate‑limit** `/api/chat` per IP & Clerk ID (Redis sliding window).  
+* **Edge Functions** give lower latency for streaming completions.  
+* **Avoid env leakage** — assume keys already exist (per Gio’s rule).  
+* **Square** needs an **`Origin` whitelist** for Checkout success redirect.  
+* **Test webhooks locally** with **ngrok + `npm run squared`** script.
+
+---
+## 16 · Open Questions
+1. Final decide between **React Query** vs **SWR** (pick one).  
+2. Will we offer **Claude** via Anthropic at launch? (pricing TBD).  
+3. Export formats besides JSONL (PDF transcript?).
+
+---
+**Next Step →** Gio, scan the checklist. Confirm priorities or tweak the 6‑week roadmap, then we’ll break Week 1 tasks into issues.
+
