@@ -22,7 +22,7 @@ export default function Features() {
             <CardTitle className="text-white/90">Top-Tier Models</CardTitle>
           </CardHeader>
           <CardContent>
-            <p className="text-white/80">Choose from the best: GPT-4o, Mistral-Large, Gemini 1.5 Pro. Always access the latest capabilities.</p>
+            <p className="text-white/80">Choose from the best: GPT-4o, Mistral-Large, Gemini 1.5 Pro & more! Always access the latest capabilities.</p>
           </CardContent>
         </Card>
         <Card className="text-center bg-white/10 backdrop-blur-md border-none shadow-xl hover:scale-[1.025] transition-transform">
